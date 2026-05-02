@@ -22,7 +22,7 @@ import * as eventTool from 'zrender/src/core/event';
 import * as interactionMutex from './interactionMutex';
 import { ZRenderType } from 'zrender/src/zrender';
 import { ZRElementEvent, RoamOptionMixin, NullUndefined } from '../../util/types';
-import { Bind3, isString, bind, defaults, extend, retrieve2 } from 'zrender/src/core/util';
+import { Bind3, bind, defaults, extend, retrieve2 } from 'zrender/src/core/util';
 import { makeInner } from '../../util/model';
 import { retrieveZInfo } from '../../util/graphic';
 import type Component from '../../model/Component';
@@ -46,17 +46,14 @@ export interface RoamOption {
     }
     api: ExtensionAPI
 
-    zoomOnMouseWheel?: boolean | 'ctrl' | 'shift' | 'alt'
-    moveOnMouseMove?: boolean | 'ctrl' | 'shift' | 'alt'
-    moveOnMouseWheel?: boolean | 'ctrl' | 'shift' | 'alt'
     /**
-     * Restrict wheel-driven zoom to a single wheel axis. Unset = no restriction.
+     * Canonical-form wheel-trigger lists. Each entry keeps the modifier condition
+     * paired with its wheel-axis restriction, and the behavior fires when the
+     * event matches ANY entry (OR semantics). `[]` means never.
      */
-    zoomOnMouseWheelAxis?: WheelAxisType
-    /**
-     * Restrict wheel-driven pan to a single wheel axis. Unset = no restriction.
-     */
-    moveOnMouseWheelAxis?: WheelAxisType
+    zoomOnMouseWheel?: MouseWheelOption[]
+    moveOnMouseMove?: MouseModifierConstraint[]
+    moveOnMouseWheel?: MouseWheelOption[]
     /**
      * If fixed the page when pan
      */
@@ -205,13 +202,10 @@ class RoamController extends Eventful<RoamEventDefinition> {
             const triggerInfo = extend({}, rawOpt.triggerInfo);
 
             this._opt = defaults(extend({}, rawOpt), {
-                zoomOnMouseWheel: true,
-                moveOnMouseMove: true,
-                // By default, wheel do not trigger move.
-                moveOnMouseWheel: false,
-                // `undefined` = no axis restriction.
-                zoomOnMouseWheelAxis: undefined,
-                moveOnMouseWheelAxis: undefined,
+                zoomOnMouseWheel: ALWAYS_MATCH_MOUSE_WHEEL_OPTIONS,
+                moveOnMouseMove: ALWAYS_MATCH_CONSTRAINTS,
+                // By default, wheel does not trigger move.
+                moveOnMouseWheel: NEVER_MATCH_MOUSE_WHEEL_OPTIONS,
                 preventDefaultMouseMove: true,
                 zInfoParsed,
                 triggerInfo,
@@ -350,7 +344,7 @@ class RoamController extends Eventful<RoamEventDefinition> {
         const y = e.offsetY;
 
         if (!this._dragging
-            || !isAvailableBehavior('moveOnMouseMove', e, this._opt)
+            || !mouseModifierConstraintsMatch(this._opt.moveOnMouseMove, e)
         ) {
             const cursorStyle = this._decideCursorStyle(e, x, y, false);
             if (cursorStyle) {
@@ -400,13 +394,7 @@ class RoamController extends Eventful<RoamEventDefinition> {
             return;
         }
 
-        const zoomAvailable = isAvailableBehavior('zoomOnMouseWheel', e, this._opt);
-        const moveAvailable = isAvailableBehavior('moveOnMouseWheel', e, this._opt);
         const wheelDelta = e.wheelDelta;
-        // wheelDelta maybe -0 in chrome mac.
-        if (wheelDelta === 0 || (!zoomAvailable && !moveAvailable)) {
-            return;
-        }
 
         // Reach through to the native WheelEvent for per-axis deltas;
         // zrender's `wheelDelta` collapses the two axes into a single scalar.
@@ -414,15 +402,14 @@ class RoamController extends Eventful<RoamEventDefinition> {
         // passed default in that case.
         const nativeEvent = (e.event as unknown as WheelEvent) || null;
 
-        // When axis restriction is set, the wheel must carry delta
-        // on that axis or the event falls through to the browser.
-        const zoomAxis = this._opt.zoomOnMouseWheelAxis;
-        const moveAxis = this._opt.moveOnMouseWheelAxis;
-        const shouldZoom = zoomAvailable
-            && (zoomAxis == null || axisHasDelta(nativeEvent, zoomAxis));
-        const shouldMove = moveAvailable
-            && (moveAxis == null || axisHasDelta(nativeEvent, moveAxis));
-        if (!shouldZoom && !shouldMove) {
+        const shouldZoom = mouseWheelOptionMatches(
+            this._opt.zoomOnMouseWheel, e, nativeEvent
+        );
+        const shouldMove = mouseWheelOptionMatches(
+            this._opt.moveOnMouseWheel, e, nativeEvent
+        );
+        // wheelDelta maybe -0 in chrome mac.
+        if (wheelDelta === 0 || (!shouldZoom && !shouldMove)) {
             return;
         }
 
@@ -508,6 +495,11 @@ function eventConsumed(e: ZRElementEvent): boolean {
  */
 export type WheelAxisType = 'horizontal' | 'vertical';
 
+export interface MouseWheelOption {
+    modifier: MouseModifierConstraint
+    axis?: WheelAxisType
+}
+
 // Legacy WebKit exposes these per-axis siblings alongside `wheelDelta`; prefer
 // them when present because they preserve the exact per-notch scaling the
 // IE-style wheel APIs used.
@@ -531,6 +523,16 @@ function axisHasDelta(
         return true;
     }
     return axisWheelDelta(nativeEvent, axis) !== 0;
+}
+
+function mouseWheelOptionMatches(
+    options: MouseWheelOption[],
+    e: ZRElementEvent,
+    nativeEvent: WheelEvent | null
+): boolean {
+    return options.some(option => mouseModifierConditionMatches(option.modifier, e)
+        && (option.axis == null || axisHasDelta(nativeEvent, option.axis))
+    );
 }
 
 /**
@@ -731,21 +733,95 @@ function trigger<T extends RoamEventType>(
     (controller as any).trigger(eventName, contollerEvent);
 }
 
-// settings: {
-//     zoomOnMouseWheel
-//     moveOnMouseMove
-//     moveOnMouseWheel
-// }
-// The value can be: true / false / 'shift' / 'ctrl' / 'alt'.
+/**
+ * Set of modifier keys recognized in `MouseModifierConstraint`.
+ */
+const MOUSE_MODIFIERS = ['shift', 'ctrl', 'alt', 'meta'] as const;
+type MouseModifier = typeof MOUSE_MODIFIERS[number];
+
+/**
+ * Canonical form of a modifier-key constraint.
+ *
+ * Each field is tri-state:
+ * - `true`  → the modifier must be held
+ * - `false` → the modifier must NOT be held
+ * - omitted (or `null` / `undefined`) → don't care
+ *
+ * `{}` matches any modifier state (equivalent to the `true` shorthand).
+ */
+export type MouseModifierConstraint = { [K in MouseModifier]?: boolean };
+
+/**
+ * Public-facing condition type. Accepts both the canonical `MouseModifierConstraint`
+ * and a few ergonomic shorthands:
+ *
+ * - `false` → never matches
+ * - `true`  → always matches (= `{}`)
+ * - `'shift' | 'ctrl' | 'alt' | 'meta'` → that modifier required (others don't care)
+ * - `'none'` → no modifier may be held
+ */
+export type MouseModifierCondition =
+    | boolean
+    | MouseModifier
+    | 'none'
+    | MouseModifierConstraint;
+
+/**
+ * Normalize a `MouseModifierCondition` shorthand to the canonical `MouseModifierConstraint`,
+ * or `null` if the condition is disabled (`false`).
+ */
+export function toMouseModifierConstraint(t: MouseModifierCondition): MouseModifierConstraint | null {
+    if (typeof t === 'boolean') {
+        return t ? {} : null;
+    }
+    if (typeof t === 'string') {
+        if (t === 'none') {
+            return { shift: false, ctrl: false, alt: false, meta: false };
+        }
+        return { [t]: true };
+    }
+    return t;
+}
+
+/**
+ * Whether a zrender event satisfies the constraint.
+ */
+export function mouseModifierMatches(c: MouseModifierConstraint, e: ZRElementEvent): boolean {
+    return MOUSE_MODIFIERS.every(m => c[m] == null || c[m] === e.event[`${m}Key`]);
+}
+
+function mouseModifierConditionMatches(
+    condition: MouseModifierCondition | NullUndefined,
+    e: ZRElementEvent
+): boolean {
+    if (condition == null) {
+        return false;
+    }
+    const constraint = toMouseModifierConstraint(condition);
+    return !!constraint && mouseModifierMatches(constraint, e);
+}
+
+function mouseModifierConstraintsMatch(constraints: MouseModifierConstraint[], e: ZRElementEvent): boolean {
+    return constraints.some(c => mouseModifierConditionMatches(c, e));
+}
+
+const ALWAYS_MATCH_CONSTRAINTS: MouseModifierConstraint[] = [{}];
+const ALWAYS_MATCH_MOUSE_WHEEL_OPTIONS: MouseWheelOption[] = [{modifier: {}}];
+const NEVER_MATCH_MOUSE_WHEEL_OPTIONS: MouseWheelOption[] = [];
+
+type IsAvailableBehaviorSettings = {
+    [k in RoamBehavior]?: MouseModifierCondition;
+};
+
 function isAvailableBehavior(
     behaviorToCheck: RoamBehavior,
     e: ZRElementEvent,
-    settings: Pick<RoamOption, RoamBehavior>
-) {
-    const setting = settings[behaviorToCheck];
-    return !behaviorToCheck || (
-        setting && (!isString(setting) || e.event[setting + 'Key' as 'shiftKey' | 'ctrlKey' | 'altKey'])
-    );
+    settings: IsAvailableBehaviorSettings
+): boolean {
+    if (!behaviorToCheck) {
+        return true;
+    }
+    return mouseModifierConditionMatches(settings[behaviorToCheck], e);
 }
 
 export default RoamController;

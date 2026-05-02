@@ -19,7 +19,7 @@
 
 import DataZoomModel, {DataZoomOption} from './DataZoomModel';
 import { inheritDefaultOption } from '../../util/component';
-import { WheelAxisType } from '../helper/RoamController';
+import { WheelAxisType, MouseModifierCondition } from '../helper/RoamController';
 
 export interface InsideDataZoomOption extends DataZoomOption {
 
@@ -33,11 +33,26 @@ export interface InsideDataZoomOption extends DataZoomOption {
      */
     zoomLock?: boolean
 
-    zoomOnMouseWheel?: boolean | 'shift' | 'ctrl' | 'alt'
+    /**
+     * These interaction triggers accept the same modifier-key condition:
+     * `false` disables the trigger, `true` always enables it, a modifier name
+     * requires that key, `'none'` requires no modifiers, and object form
+     * supports per-key tri-state constraints. For example,
+     * `{ shift: true, ctrl: false }` requires shift held and ctrl not held.
+     *
+     * Controls wheel-driven zoom.
+     */
+    zoomOnMouseWheel?: MouseModifierCondition
 
-    moveOnMouseMove?: boolean | 'shift' | 'ctrl' | 'alt'
+    /**
+     * Controls drag panning.
+     */
+    moveOnMouseMove?: MouseModifierCondition
 
-    moveOnMouseWheel?: boolean | 'shift' | 'ctrl' | 'alt'
+    /**
+     * Controls wheel-driven panning.
+     */
+    moveOnMouseWheel?: MouseModifierCondition
 
     preventDefaultMouseMove?: boolean
 

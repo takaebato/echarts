@@ -1,0 +1,465 @@
+
+<!--
+Licensed to the Apache Software Foundation (ASF) under one
+or more contributor license agreements.  See the NOTICE file
+distributed with this work for additional information
+regarding copyright ownership.  The ASF licenses this file
+to you under the Apache License, Version 2.0 (the
+"License"); you may not use this file except in compliance
+with the License.  You may obtain a copy of the License at
+
+   http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing,
+software distributed under the License is distributed on an
+"AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+KIND, either express or implied.  See the License for the
+specific language governing permissions and limitations
+under the License.
+-->
+
+<html>
+    <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <script src="./lib/simpleRequire.js"></script>
+        <script src="./lib/config.js"></script>
+        <script src="./lib/facePrint.js"></script>
+        <script src="lib/testHelper.js"></script>
+        <link rel="stylesheet" href="lib/reset.css" />
+        <style>
+            h1 {
+                line-height: 48px;
+                height: 48px;
+                background: #ddd;
+                text-align: center;
+                font-weight: bold;
+                font-size: 13px;
+                margin: 24px 0 0;
+            }
+            .note {
+                padding: 8px 16px;
+                background: #fffae6;
+                border-left: 4px solid #f5c518;
+                font-size: 13px;
+                line-height: 1.6;
+            }
+            .panel-row {
+                display: flex;
+                align-items: flex-start;
+                gap: 20px;
+                max-width: 960px;
+                margin: 12px auto 0;
+            }
+            .panel-row .chart {
+                flex: 0 0 520px;
+                width: 520px;
+                height: 480px;
+                margin: 0;
+            }
+            pre.config {
+                flex: 1;
+                margin: 0;
+                padding: 12px 16px;
+                background: #f6f8fa;
+                border: 1px solid #e1e4e8;
+                border-radius: 4px;
+                font-size: 12px;
+                line-height: 1.5;
+                font-family: SFMono-Regular, Menlo, Consolas, monospace;
+                white-space: pre;
+                overflow-x: auto;
+                color: #24292e;
+            }
+        </style>
+    </head>
+    <body>
+        <div class="note">
+            Manual check for modifier-key gating on
+            <code>dataZoom.inside</code> via the
+            <code>zoomOnMouseWheel</code> / <code>moveOnMouseWheel</code> /
+            <code>moveOnMouseMove</code> options. Each panel exercises a
+            specific modifier-condition shape (string shorthand or object
+            form). Critical regression target: when the wheel's modifier state
+            does NOT match the configured condition, the chart must let the
+            event through so the surrounding page can scroll.
+        </div>
+        <div id="panels-root"></div>
+
+        <script>
+            // ---- Chart / option helpers ---------------------------------
+
+            // Fixed axis ranges so panning one axis does not auto-rescale the
+            // other between events, keeping wheel/drag effects clearly
+            // attributable during manual verification.
+            var SAMPLE_POINTS = (function () {
+                var points = [];
+                for (var i = 0; i < 200; i++) {
+                    points.push([i, Math.sin(i / 8) * 50 + 50 + Math.random() * 10]);
+                }
+                return points;
+            })();
+
+            function buildOption(dataZoom) {
+                return {
+                    tooltip: { trigger: 'axis' },
+                    grid: { left: 50, right: 30, top: 20, bottom: 50 },
+                    xAxis: { type: 'value', min: 0, max: 200 },
+                    yAxis: { type: 'value', min: 0, max: 120 },
+                    series: [{
+                        type: 'line',
+                        data: SAMPLE_POINTS,
+                        showSymbol: false,
+                        areaStyle: {}
+                    }],
+                    dataZoom: dataZoom
+                };
+            }
+
+            // Append a slider for any axes that the inside configs target so
+            // the current range stays visible during manual verification.
+            function withSliders(insideConfigs) {
+                var needX = false;
+                var needY = false;
+                insideConfigs.forEach(function (c) {
+                    if (c.yAxisIndex != null) { needY = true; }
+                    else { needX = true; }
+                });
+                var sliders = [];
+                if (needX) {
+                    sliders.push({ type: 'slider', xAxisIndex: 0, height: 18, bottom: 22 });
+                }
+                if (needY) {
+                    sliders.push({ type: 'slider', yAxisIndex: 0, width: 18, right: 8 });
+                }
+                return insideConfigs.concat(sliders);
+            }
+
+            // ---- Panel rendering ---------------------------------------
+
+            // Pretty-prints inside configs for display alongside the chart.
+            // One property per line so readers can scan the active options.
+            function formatConfigs(configs) {
+                return configs.map(function (c) {
+                    var pairs = Object.keys(c).map(function (k) {
+                        return '  ' + k + ': ' + JSON.stringify(c[k]);
+                    });
+                    return '{\n' + pairs.join(',\n') + '\n}';
+                }).join(',\n');
+            }
+
+            function createPanelDom(panel) {
+                var section = document.createElement('section');
+                var heading = document.createElement('h1');
+                heading.textContent = panel.title;
+                section.appendChild(heading);
+
+                var row = document.createElement('div');
+                row.className = 'panel-row';
+
+                var chart = document.createElement('div');
+                chart.className = 'chart';
+                chart.id = panel.id;
+                row.appendChild(chart);
+
+                var pre = document.createElement('pre');
+                pre.className = 'config';
+                pre.textContent = formatConfigs(panel.configs);
+                row.appendChild(pre);
+
+                section.appendChild(row);
+                return section;
+            }
+
+            function renderPanel(echarts, panel) {
+                var root = document.getElementById('panels-root');
+                root.appendChild(createPanelDom(panel));
+                testHelper.createChart(
+                    echarts, panel.id, buildOption(withSliders(panel.configs))
+                );
+            }
+
+            // ---- Panel definitions -------------------------------------
+
+            var PANELS = [
+                {
+                    // Baseline — wheel always zooms regardless of modifier.
+                    // Confirms the legacy default path still works after the
+                    // canonical-form refactor.
+                    id: 'baseline',
+                    title: 'A. baseline (default zoomOnMouseWheel: true)'
+                        + ' — wheel always zooms',
+                    configs: [
+                        { type: 'inside', xAxisIndex: 0, start: 30, end: 60 }
+                    ]
+                },
+                {
+                    // 'shift' shorthand — zoom only when shift is held.
+                    // This is the regression target for issue #10079:
+                    //   - shift + wheel: zooms the chart
+                    //   - plain wheel: must NOT consume the event; the
+                    //     surrounding page must scroll instead.
+                    id: 'shift-shorthand',
+                    title: "B. zoomOnMouseWheel: 'shift'"
+                        + ' — shift+wheel zooms; plain wheel falls through (#10079)',
+                    configs: [
+                        { type: 'inside', xAxisIndex: 0, start: 30, end: 60,
+                          zoomOnMouseWheel: 'shift' }
+                    ]
+                },
+                {
+                    // 'none' literal — zoom only when NO modifier is held.
+                    // The inverse of the shift case:
+                    //   - plain wheel: zooms
+                    //   - any modifier + wheel: falls through to the page,
+                    //     so e.g. ctrl+wheel still triggers the browser's
+                    //     native zoom.
+                    id: 'none-shorthand',
+                    title: "C. zoomOnMouseWheel: 'none'"
+                        + ' — plain wheel zooms; any modifier falls through',
+                    configs: [
+                        { type: 'inside', xAxisIndex: 0, start: 30, end: 60,
+                          zoomOnMouseWheel: 'none' }
+                    ]
+                },
+                {
+                    // 'meta' shorthand — Mac Cmd key (metaKey on the native
+                    // event). On Windows / Linux this maps to the OS Meta /
+                    // Super key (typically the Windows logo key) and is
+                    // rarely held during normal use, so the chart effectively
+                    // never zooms; on macOS, Cmd + wheel zooms.
+                    // Tip: trackpad pinch synthesizes ctrlKey, NOT metaKey,
+                    // so trackpad pinch will fall through here.
+                    id: 'meta-shorthand',
+                    title: "D. zoomOnMouseWheel: 'meta'"
+                        + ' — Mac Cmd+wheel zooms; plain / other modifiers fall through',
+                    configs: [
+                        { type: 'inside', xAxisIndex: 0, start: 30, end: 60,
+                          zoomOnMouseWheel: 'meta' }
+                    ]
+                },
+                {
+                    // Object form, single key — equivalent to the 'shift'
+                    // shorthand. Sanity check that the canonical form
+                    // matches shorthand semantics.
+                    id: 'object-shift-only',
+                    title: 'E. zoomOnMouseWheel: { shift: true }'
+                        + ' — equivalent to shorthand, sanity check',
+                    configs: [
+                        { type: 'inside', xAxisIndex: 0, start: 30, end: 60,
+                          zoomOnMouseWheel: { shift: true } }
+                    ]
+                },
+                {
+                    // Object form, multi-key — shift required AND ctrl
+                    // forbidden. The "forbidden" case is what shorthand
+                    // alone cannot express:
+                    //   - shift + wheel: zooms
+                    //   - shift + ctrl + wheel: falls through (ctrl held)
+                    //   - plain wheel: falls through (shift not held)
+                    id: 'object-shift-not-ctrl',
+                    title: 'F. zoomOnMouseWheel: { shift: true, ctrl: false }'
+                        + ' — shift required AND ctrl forbidden',
+                    configs: [
+                        { type: 'inside', xAxisIndex: 0, start: 30, end: 60,
+                          zoomOnMouseWheel: { shift: true, ctrl: false } }
+                    ]
+                },
+                {
+                    // Object form with negative-only constraint — shift must
+                    // NOT be held; other modifiers do not matter.
+                    //   - plain wheel: zooms
+                    //   - ctrl / alt / meta + wheel: zooms (others not held)
+                    //   - shift + wheel: falls through
+                    id: 'object-not-shift',
+                    title: 'G. zoomOnMouseWheel: { shift: false }'
+                        + ' — anything except shift; modifier mismatch falls through',
+                    configs: [
+                        { type: 'inside', xAxisIndex: 0, start: 30, end: 60,
+                          zoomOnMouseWheel: { shift: false } }
+                    ]
+                },
+                {
+                    // Two inside dataZooms sharing one controller, each with
+                    // a different modifier requirement. Verifies the OR
+                    // aggregation across active dataZooms inside
+                    // mergeControllerParams:
+                    //   - shift + wheel: x-zoom fires
+                    //   - ctrl + wheel: y-zoom fires
+                    //   - plain wheel: neither would fire, so the controller
+                    //     falls through and the page scrolls.
+                    // This is the multi-dataZoom variant of the #10079 fix.
+                    id: 'or-shift-ctrl',
+                    title: 'H. dual: x-dz wants shift, y-dz wants ctrl'
+                        + ' — OR semantics; plain wheel falls through',
+                    configs: [
+                        { type: 'inside', xAxisIndex: 0, start: 30, end: 60,
+                          zoomOnMouseWheel: 'shift' },
+                        { type: 'inside', yAxisIndex: 0, start: 30, end: 70,
+                          zoomOnMouseWheel: 'ctrl' }
+                    ]
+                },
+                {
+                    // Regression for modifier/axis pairing:
+                    //   - meta + horizontal wheel: x-zoom fires
+                    //   - ctrl + vertical wheel: y-zoom fires
+                    //   - meta + vertical wheel: modifier matches x-dz but
+                    //     axis does not; no full pair matches, so the page
+                    //     must keep scrolling instead of being consumed.
+                    id: 'paired-modifier-axis-fallthrough',
+                    title: 'H2. dual: x wants meta+horizontal, y wants ctrl+vertical'
+                        + ' — partial pair matches fall through',
+                    configs: [
+                        { type: 'inside', xAxisIndex: 0, start: 30, end: 60,
+                          zoomOnMouseWheel: 'meta',
+                          zoomOnMouseWheelAxis: 'horizontal' },
+                        { type: 'inside', yAxisIndex: 0, start: 30, end: 70,
+                          zoomOnMouseWheel: 'ctrl',
+                          zoomOnMouseWheelAxis: 'vertical' }
+                    ]
+                },
+                {
+                    // Same modifier/axis-pair regression as H2, but for
+                    // wheel pan. A partial match must not consume the page
+                    // scroll when no dataZoom can actually pan.
+                    //   - meta + horizontal wheel: x-pan fires
+                    //   - ctrl + vertical wheel: y-pan fires
+                    //   - meta + vertical wheel: falls through
+                    //   - ctrl + horizontal wheel: falls through
+                    id: 'paired-modifier-axis-pan-fallthrough',
+                    title: 'H3. dual pan: x wants meta+horizontal, y wants ctrl+vertical'
+                        + ' — partial pair matches fall through',
+                    configs: [
+                        { type: 'inside', xAxisIndex: 0, start: 30, end: 60,
+                          zoomOnMouseWheel: false,
+                          moveOnMouseWheel: 'meta',
+                          moveOnMouseWheelAxis: 'horizontal' },
+                        { type: 'inside', yAxisIndex: 0, start: 30, end: 70,
+                          zoomOnMouseWheel: false,
+                          moveOnMouseWheel: 'ctrl',
+                          moveOnMouseWheelAxis: 'vertical' }
+                    ]
+                },
+                {
+                    // moveOnMouseWheel with a modifier — vertical wheel pans
+                    // the x-axis ONLY when ctrl is held. Plain wheel must
+                    // fall through to the page. Same shape as #10079 but
+                    // for the pan path.
+                    id: 'pan-ctrl-shorthand',
+                    title: "I. moveOnMouseWheel: 'ctrl'"
+                        + ' — ctrl+wheel pans; plain wheel falls through',
+                    configs: [
+                        { type: 'inside', xAxisIndex: 0, start: 30, end: 60,
+                          zoomOnMouseWheel: false,
+                          moveOnMouseWheel: 'ctrl' }
+                    ]
+                },
+                {
+                    // moveOnMouseMove with a modifier — drag-pan only when
+                    // shift is held. Without shift, normal text selection
+                    // and page interaction proceed instead of being
+                    // hijacked by the chart. Verifies the same fall-through
+                    // logic applies to mousemove.
+                    id: 'drag-pan-shift',
+                    title: "J. moveOnMouseMove: 'shift'"
+                        + ' — shift+drag pans; plain drag does not (text-select works)',
+                    configs: [
+                        { type: 'inside', xAxisIndex: 0, start: 30, end: 60,
+                          moveOnMouseMove: 'shift', zoomOnMouseWheel: false }
+                    ]
+                },
+                {
+                    // Distinct modifiers per behavior on the same dataZoom:
+                    //   - shift + wheel: zooms
+                    //   - ctrl + wheel: pans
+                    //   - plain wheel: falls through
+                    // Useful for chart UIs that want to bind multiple
+                    // gestures to different actions on the same axis.
+                    id: 'mixed-zoom-pan',
+                    title: "K. zoom='shift' + pan='ctrl' on the same dataZoom"
+                        + ' — independent modifier bindings per behavior',
+                    configs: [
+                        { type: 'inside', xAxisIndex: 0, start: 30, end: 60,
+                          zoomOnMouseWheel: 'shift',
+                          moveOnMouseWheel: 'ctrl' }
+                    ]
+                },
+                {
+                    // All inside dataZooms explicitly disable wheel handling.
+                    // The merged matchers are empty for both zoom and move,
+                    // so the controller must fall through unconditionally.
+                    // This is the trivial-but-easy-to-regress baseline of
+                    // the #10079 fix on the merge side.
+                    id: 'all-disabled',
+                    title: 'L. zoomOnMouseWheel: false, moveOnMouseWheel: false'
+                        + ' — nothing reacts to wheel; page scrolls freely',
+                    configs: [
+                        { type: 'inside', xAxisIndex: 0, start: 30, end: 60,
+                          zoomOnMouseWheel: false, moveOnMouseWheel: false }
+                    ]
+                },
+                {
+                    // Realistic combo — the most common UX users likely want:
+                    //   - Vertical wheel:        pans the y-axis
+                    //   - Horizontal wheel:      pans the x-axis (tilt wheel
+                    //                            or trackpad horizontal swipe)
+                    //   - Ctrl + wheel:          zooms (both axes uniformly,
+                    //                            since neither dataZoom adds
+                    //                            zoomOnMouseWheelAxis)
+                    //   - Other modifiers:       fall through to the page
+                    //
+                    // Per-axis pan uses `moveOnMouseWheelAxis` so each axis
+                    // listens to its matching wheel direction. Pan is gated
+                    // by `{ ctrl: false }` so ctrl+wheel routes to zoom
+                    // instead. The browser shift+vertical-wheel → horizontal
+                    // conversion still works for x-pan because shift is left
+                    // unconstrained (don't care).
+                    id: 'realistic-pan-zoom',
+                    title: 'M. realistic combo'
+                        + ' — vertical→y pan, horizontal→x pan, ctrl+wheel→zoom',
+                    configs: [
+                        { type: 'inside', xAxisIndex: 0, start: 30, end: 60,
+                          moveOnMouseWheel: { ctrl: false },
+                          moveOnMouseWheelAxis: 'horizontal',
+                          zoomOnMouseWheel: 'ctrl' },
+                        { type: 'inside', yAxisIndex: 0, start: 30, end: 70,
+                          moveOnMouseWheel: { ctrl: false },
+                          moveOnMouseWheelAxis: 'vertical',
+                          zoomOnMouseWheel: 'ctrl' }
+                    ]
+                },
+                {
+                    // Map-app style — drag pans, wheel does NOT pan, ctrl+wheel
+                    // zooms. Probably the most common chart UX in dashboards
+                    // and spatial data viewers. The chart never hijacks plain
+                    // wheel input, so the surrounding page can scroll freely.
+                    //
+                    // Note: this exact config was already expressible with the
+                    // pre-existing `'ctrl'` shorthand, but plain wheel used to
+                    // be wrongly consumed by the controller (issue #10079).
+                    // After the fall-through fix in this PR, it now behaves
+                    // as expected — the panel doubles as a regression check.
+                    id: 'drag-pan-ctrl-zoom',
+                    title: 'N. map-app style'
+                        + " — drag pans, ctrl+wheel zooms, plain wheel scrolls page",
+                    configs: [
+                        { type: 'inside', xAxisIndex: 0, start: 30, end: 60,
+                          moveOnMouseMove: true,
+                          moveOnMouseWheel: false,
+                          zoomOnMouseWheel: 'ctrl' },
+                        { type: 'inside', yAxisIndex: 0, start: 30, end: 70,
+                          moveOnMouseMove: true,
+                          moveOnMouseWheel: false,
+                          zoomOnMouseWheel: 'ctrl' }
+                    ]
+                }
+            ];
+
+            require(['echarts'], function (echarts) {
+                PANELS.forEach(function (panel) {
+                    renderPanel(echarts, panel);
+                });
+            });
+        </script>
+    </body>
+</html>

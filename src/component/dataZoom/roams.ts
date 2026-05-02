@@ -23,7 +23,12 @@
 // pan or zoom, only dispatch one action for those data zoom
 // components.
 
-import RoamController, { RoamOption, WheelAxisType } from '../../component/helper/RoamController';
+import RoamController, {
+    RoamOption,
+    MouseWheelOption,
+    MouseModifierConstraint,
+    toMouseModifierConstraint
+} from '../../component/helper/RoamController';
 import * as throttleUtil from '../../util/throttle';
 import { makeInner } from '../../util/model';
 import { Dictionary, RoamOptionMixin, ZRElementEvent } from '../../util/types';
@@ -128,6 +133,8 @@ function createCoordSysRecord(api: ExtensionAPI, coordSysModel: CoordinateSystem
             coordSysRecord.dataZoomInfoMap.each(function (dzInfo) {
                 // Check whether the behaviors (zoomOnMouseWheel, moveOnMouseMove,
                 // moveOnMouseWheel, ...) enabled.
+                // Wheel-axis restrictions are applied in InsideZoomView; axis
+                // mismatches become unchanged ranges.
                 if (!event.isAvailableBehavior(dzInfo.model.option)) {
                     return;
                 }
@@ -198,10 +205,9 @@ function mergeControllerParams(
         'type_undefined': -1
     };
     let preventDefaultMouseMove = true;
-    let zoomOnMouseWheelEverActive = false;
-    let moveOnMouseWheelEverActive = false;
-    let zoomOnMouseWheelAxis: WheelAxisType | undefined;
-    let moveOnMouseWheelAxis: WheelAxisType | undefined;
+    const zoomOnMouseWheel: MouseWheelOption[] = [];
+    const moveOnMouseMove: MouseModifierConstraint[] = [];
+    const moveOnMouseWheel: MouseWheelOption[] = [];
 
     dataZoomInfoMap.each(function (dataZoomInfo) {
         const dataZoomModel = dataZoomInfo.model;
@@ -219,40 +225,39 @@ function mergeControllerParams(
         preventDefaultMouseMove = preventDefaultMouseMove
             && dataZoomModel.get('preventDefaultMouseMove', true);
 
-        if (dataZoomModel.get('zoomOnMouseWheel', true) !== false) {
-            const axis = dataZoomModel.get('zoomOnMouseWheelAxis', true);
-            if (!zoomOnMouseWheelEverActive) {
-                zoomOnMouseWheelAxis = axis;
-            }
-            else if (zoomOnMouseWheelAxis !== axis) {
-                zoomOnMouseWheelAxis = undefined;
-            }
-            zoomOnMouseWheelEverActive = true;
+        const moveOnMouseMoveConstraint = toMouseModifierConstraint(
+            dataZoomModel.get('moveOnMouseMove', true)
+        );
+        if (moveOnMouseMoveConstraint) {
+            moveOnMouseMove.push(moveOnMouseMoveConstraint);
         }
-        if (dataZoomModel.get('moveOnMouseWheel', true) !== false) {
-            const axis = dataZoomModel.get('moveOnMouseWheelAxis', true);
-            if (!moveOnMouseWheelEverActive) {
-                moveOnMouseWheelAxis = axis;
-            }
-            else if (moveOnMouseWheelAxis !== axis) {
-                moveOnMouseWheelAxis = undefined;
-            }
-            moveOnMouseWheelEverActive = true;
+
+        const zoomConstraint = toMouseModifierConstraint(dataZoomModel.get('zoomOnMouseWheel', true));
+        if (zoomConstraint) {
+            zoomOnMouseWheel.push({
+                modifier: zoomConstraint,
+                axis: dataZoomModel.get('zoomOnMouseWheelAxis', true)
+            });
+        }
+        const moveConstraint = toMouseModifierConstraint(dataZoomModel.get('moveOnMouseWheel', true));
+        if (moveConstraint) {
+            moveOnMouseWheel.push({
+                modifier: moveConstraint,
+                axis: dataZoomModel.get('moveOnMouseWheelAxis', true)
+            });
         }
     });
 
     return {
         controlType: controlType,
         opt: {
-            // RoamController enables these functionalities if any inside
-            // zoom opts in, and the final behavior (including modifier
-            // specifics) is determined by its event listener provided by
-            // each inside zoom.
-            zoomOnMouseWheel: zoomOnMouseWheelEverActive,
-            moveOnMouseMove: true,
-            moveOnMouseWheel: moveOnMouseWheelEverActive,
-            zoomOnMouseWheelAxis: zoomOnMouseWheelAxis,
-            moveOnMouseWheelAxis: moveOnMouseWheelAxis,
+            // Wheel entries preserve each dataZoom's modifier/axis pair. The
+            // controller consumes the wheel only when some full pair matches.
+            // Per-dataZoom re-checks still happen on the listener side for
+            // self-filtering.
+            zoomOnMouseWheel: zoomOnMouseWheel,
+            moveOnMouseMove: moveOnMouseMove,
+            moveOnMouseWheel: moveOnMouseWheel,
             preventDefaultMouseMove: !!preventDefaultMouseMove,
             api,
             zInfo: {
