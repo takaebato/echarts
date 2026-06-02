@@ -65,6 +65,12 @@ export interface InsideDataZoomOption extends DataZoomOption {
     zoomOnMouseWheelAxis?: WheelAxisType
 
     /**
+     * Mouse cursor styles on states "can grab" and "grabbing".
+     */
+    cursorGrab?: string
+    cursorGrabbing?: string
+
+    /**
      * Inside dataZoom don't support textStyle
      */
     textStyle?: never
